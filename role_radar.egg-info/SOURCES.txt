@@ -5,6 +5,8 @@ role_radar/cli.py
 role_radar/crawler.py
 role_radar/evaluator.py
 role_radar/excel_store.py
+role_radar/global_search.py
+role_radar/global_store.py
 role_radar/models.py
 role_radar.egg-info/PKG-INFO
 role_radar.egg-info/SOURCES.txt
@@ -14,3 +16,4 @@ role_radar.egg-info/requires.txt
 role_radar.egg-info/top_level.txt
 tests/test_evaluator.py
 tests/test_excel_store.py
+tests/test_global_search.py

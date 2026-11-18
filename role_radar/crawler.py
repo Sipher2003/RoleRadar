@@ -27,7 +27,10 @@ def fetch(url: str, timeout: int = 20) -> tuple[str, str]:
 
 
 def discover_job_links(start_url: str, limit: int = 500) -> list[str]:
-    html, final_url = fetch(start_url)
+    try:
+        html, final_url = fetch(start_url)
+    except requests.RequestException:
+        html, final_url = "", start_url
     soup = BeautifulSoup(html, "html.parser")
     base = urlparse(final_url)
     origin = f"{base.scheme}://{base.netloc}"
@@ -87,8 +90,48 @@ def discover_with_browser(start_url: str, limit: int) -> list[str]:
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=True)
             page = browser.new_page()
-            page.goto(start_url, wait_until="networkidle", timeout=60000)
-            page.wait_for_timeout(1500)
+            page.goto(start_url, wait_until="domcontentloaded", timeout=60000)
+            page.wait_for_timeout(5000)
+
+            apply_links = page.locator("a").evaluate_all(
+                """a => a.filter(x => /apply/i.test(x.textContent))
+                             .map(x => x.href)"""
+            )
+            if apply_links:
+                for absolute in apply_links:
+                    clean = normalize_job_url(absolute)
+                    if clean and clean not in seen:
+                        seen.add(clean)
+                        links.append(clean)
+
+                for _ in range(54):
+                    if len(links) >= limit:
+                        break
+                    next_control = page.locator(
+                        "a[aria-label='next page']"
+                    ).first
+                    if next_control.count() == 0:
+                        break
+                    try:
+                        before = len(seen)
+                        next_control.click(timeout=5000)
+                        page.wait_for_timeout(1800)
+                        for href in page.locator("a").evaluate_all(
+                            """a => a.filter(x => /apply/i.test(x.textContent))
+                                         .map(x => x.href)"""
+                        ):
+                            clean = normalize_job_url(href)
+                            if clean and clean not in seen:
+                                seen.add(clean)
+                                links.append(clean)
+                                if len(links) >= limit:
+                                    break
+                        if len(seen) == before:
+                            break
+                    except Exception:
+                        break
+                browser.close()
+                return links
 
             page_urls = [start_url]
             visited_pages: set[str] = set()
@@ -163,6 +206,10 @@ def is_likely_job_url(url: str) -> bool:
     actual_patterns = (
         "/job/",
         "/jobs/",
+        "/jobs/view/",
+        "/viewjob",
+        "/vacancies/",
+        "/vacancy/",
         "/job/",
         "/positions/",
         "/position/",
@@ -175,6 +222,20 @@ def is_likely_job_url(url: str) -> bool:
     if re.search(r"/\d{5,}(?:/)?$", path):
         return True
     return False
+
+
+def normalize_job_url(url: str) -> str:
+    clean = url.strip().split("#", 1)[0]
+    parsed = urlparse(clean)
+    if parsed.scheme not in ("http", "https"):
+        return ""
+    path = parsed.path
+    if path.rstrip("/").lower().endswith("/apply"):
+        path = path.rstrip("/")[:-len("/apply")]
+        clean = f"{parsed.scheme}://{parsed.netloc}{path}/"
+    if not is_likely_job_url(clean):
+        return ""
+    return clean
 
 
 def is_known_ats_host(host: str) -> bool:

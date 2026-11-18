@@ -24,8 +24,15 @@ SENIOR_TITLE_RE = re.compile(
     re.I,
 )
 
+NON_TECH_TITLE_RE = re.compile(
+    r"\b(?:talent acquisition|recruiter|recruitment|account executive|"
+    r"sales|customer support|support coach|marketing|financial analyst|"
+    r"accountant|accounting|human resources|hr partner)\b",
+    re.I,
+)
+
 ENTRY_SIGNAL_RE = re.compile(
-    r"\b(?:entry[\s-]?level|fresher|fresh(er)? graduate|new graduate|"
+    r"\b(?:entry[\s-]?level|fresher|fresh(er)? graduate|new graduate|associate|"
     r"new grad|graduate trainee|early career|intern|0\s*(?:-|to)\s*1)\b",
     re.I,
 )
@@ -141,6 +148,32 @@ def extract_posting_date(soup: BeautifulSoup, text: str) -> date | None:
     return None
 
 
+def extract_location(text: str) -> str:
+    lower = text.lower()
+    if re.search(r"\b(?:work from home|work-from-home|remote|hybrid)\b", lower):
+        return "Remote / Hybrid"
+
+    indian_cities = (
+        "Bengaluru",
+        "Bangalore",
+        "Hyderabad",
+        "Mumbai",
+        "Delhi",
+        "Gurugram",
+        "Gurgaon",
+        "Pune",
+        "Chennai",
+        "Kolkata",
+        "Ahmedabad",
+        "Noida",
+        "India",
+    )
+    found = [city for city in indian_cities if re.search(rf"\b{re.escape(city)}\b", text, re.I)]
+    if found:
+        return ", ".join(dict.fromkeys(found))
+    return "Unknown"
+
+
 def normalize_experience(text: str) -> tuple[float, float]:
     normalized = text.lower().strip()
     if re.search(
@@ -194,7 +227,22 @@ def evaluate_job(
     try:
         html, final_url = fetch(link)
     except requests.RequestException:
-        return None
+        html, final_url = "", link
+
+    browser_hosts = ("workday", "linkedin.com", "naukri.com", "indeed.com")
+    if any(host in urlparse(link).netloc.lower() for host in browser_hosts):
+        try:
+            from playwright.sync_api import sync_playwright
+
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.launch(headless=True)
+                page = browser.new_page()
+                page.goto(link, wait_until="domcontentloaded", timeout=60000)
+                page.wait_for_timeout(2500)
+                html = page.content()
+                browser.close()
+        except Exception:
+            pass
 
     if not is_likely_job_url(final_url):
         return None
@@ -217,13 +265,18 @@ def evaluate_job(
     lower = text.lower()
     experience = extract_experience(text)
     posting_date = extract_posting_date(soup, text)
+    detected_location = extract_location(text)
 
     desired_min, desired_max = normalize_experience(constraints.experience)
     confidence = 35
     reasons: list[str] = []
 
-    experience_matches = [float(match.group(1)) for match in EXP_RE.finditer(text)]
-    minimum = min(experience_matches) if experience_matches else None
+    experience_matches: list[float] = []
+    for match in EXP_RE.finditer(text):
+        experience_matches.append(float(match.group(1)))
+        if match.group(2):
+            experience_matches.append(float(match.group(2)))
+    minimum = max(experience_matches) if experience_matches else None
     wants_fresher = desired_max <= 1.0
 
     if minimum is not None:
@@ -243,6 +296,10 @@ def evaluate_job(
     if SENIOR_TITLE_RE.search(title) and wants_fresher:
         confidence -= 40
         reasons.append("Title indicates senior or management scope")
+
+    if NON_TECH_TITLE_RE.search(title):
+        confidence -= 100
+        reasons.append("Title is outside the software/technology role set")
 
     matched_technologies: list[str] = []
     for technology in constraints.technologies or []:
@@ -266,6 +323,22 @@ def evaluate_job(
     if SENIOR_TITLE_RE.search(title) and wants_fresher:
         is_match = False
 
+    if NON_TECH_TITLE_RE.search(title):
+        is_match = False
+
+    location_constraint = constraints.location.lower()
+    if "india" in location_constraint:
+        foreign_location_re = re.compile(
+            r"\b(?:united kingdom|uk\b|london|england|scotland|wales|ireland|"
+            r"europe|emea|benelux|amsterdam|berlin|germany|france|netherlands|"
+            r"new york|united states|usa\b|canada|australia|switzerland|"
+            r"zurich|zürich|sweden)\b",
+            re.I,
+        )
+        if foreign_location_re.search(text):
+            is_match = False
+            reasons.append("Location is outside India")
+
     return Opening(
         company=infer_company(final_url, company_override),
         title=title,
@@ -275,4 +348,18 @@ def evaluate_job(
         is_match=is_match,
         confidence=max(0, min(confidence, 100)),
         reason="; ".join(reasons) or "No explicit JD match signals",
+        location=extract_location(text),
+        source=(
+            "LinkedIn" if "linkedin.com" in urlparse(final_url).netloc
+            else "Naukri" if "naukri.com" in urlparse(final_url).netloc
+            else "Indeed" if "indeed.com" in urlparse(final_url).netloc
+            else "Wellfound" if "wellfound.com" in urlparse(final_url).netloc
+            else "Hirist" if "hirist" in urlparse(final_url).netloc
+            else "Hirect" if "hirect" in urlparse(final_url).netloc
+            else "Arbeitnow" if "arbeitnow" in urlparse(final_url).netloc
+            else "Himalayas" if "himalayas" in urlparse(final_url).netloc
+            else "Remotive" if "remotive" in urlparse(final_url).netloc
+            else "Workday" if "workday" in urlparse(final_url).netloc
+            else "Unknown"
+        ),
     )

@@ -9,6 +9,7 @@ class SearchConstraints:
     experience: str = "0-1"
     technologies: list[str] | None = None
     include_unknown: bool = False
+    location: str = "India"
 
     def __post_init__(self) -> None:
         self.technologies = [item.strip() for item in (self.technologies or []) if item.strip()]
@@ -40,3 +41,5 @@ class Opening:
     is_match: bool
     confidence: int
     reason: str
+    location: str = "Unknown"
+    source: str = "Unknown"

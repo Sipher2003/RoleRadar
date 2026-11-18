@@ -15,6 +15,14 @@ py -m playwright install chromium
 role-radar "https://company.example/careers" --experience "0-1" --tech Python --tech Django
 ```
 
+## Global internet search
+
+```powershell
+role-radar search --experience "0-1,fresher" --location "India,remote" --tech "Python,Java,AI/ML,ERP,Data Engineering,frontend,backend,automation testing" --days 7
+```
+
+The global command searches LinkedIn, Indeed, Naukri, Wellfound, Glassdoor, and general public search indexes. It writes matches to `search_openings_*.xlsx` and places unverified/search-result-only entries in the `Manual Review` sheet.
+
 Options:
 
 - Repeat `--tech` or separate technologies with commas.

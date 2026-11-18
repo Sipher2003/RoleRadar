@@ -1,6 +1,6 @@
 from datetime import date, datetime
-from urllib.parse import urlparse
 import re
+from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
 import requests
@@ -10,34 +10,87 @@ from .models import Opening, SearchConstraints
 
 
 EXP_RE = re.compile(
-    r"(?<!\d)(\d+(?:\.\d+)?)\s*(?:[-+]\s*(\d+(?:\.\d+)?)|to\s*(\d+(?:\.\d+)?)|plus)?\s*(?:years?|yrs?|year)",
+    r"(?<!\d)"
+    r"(\d+(?:\.\d+)?)"
+    r"(?:\s*(?:-|to)\s*(\d+(?:\.\d+)?)|\s*\+)?"
+    r"\s*(?:years?|yrs?)\b",
     re.I,
 )
 DATE_RE = re.compile(r"\b(20\d{2})[-/](\d{1,2})[-/](\d{1,2})\b")
+
+SENIOR_TITLE_RE = re.compile(
+    r"\b(?:lead|senior|sr\.?|manager|deputy|principal|director|head|vp|"
+    r"vice president|staff engineer|distinguished engineer)\b",
+    re.I,
+)
+
+ENTRY_SIGNAL_RE = re.compile(
+    r"\b(?:entry[\s-]?level|fresher|fresh(er)? graduate|new graduate|"
+    r"new grad|graduate trainee|early career|intern|0\s*(?:-|to)\s*1)\b",
+    re.I,
+)
+
+TECH_ALIASES = {
+    "ai/ml": ("artificial intelligence", "machine learning", " ai ", " ml "),
+    "aiml": ("artificial intelligence", "machine learning", " ai ", " ml "),
+    "ai": ("artificial intelligence", " ai "),
+    "machine learning": ("machine learning", " ml "),
+    "data engineering": (
+        "data engineering",
+        "data engineer",
+        "etl",
+        "data pipeline",
+        "apache spark",
+        " spark ",
+    ),
+    "erp": ("erp", "enterprise resource planning", "sap", "oracle", "workday"),
+}
 
 
 def infer_company(url: str, override: str | None = None) -> str:
     if override:
         return override.strip()
+
     host = urlparse(url).netloc.lower()
-    if host.startswith("www."):
-        host = host[4:]
-    if "greenhouse.io" in host:
-        parts = host.split(".")
-        return parts[0].replace("-", " ").title() if len(parts) > 1 else host
+    if host.startswith("www.") or host.startswith("www2."):
+        host = host.removeprefix("www2.").removeprefix("www.")
+
+    known_ats_names = (
+        ("greenhouse.io", "Greenhouse"),
+        ("lever.co", "Lever"),
+        ("smartrecruiters", "SmartRecruiters"),
+        ("ashbyhq", "Ashby"),
+        ("workday", "Workday"),
+    )
+    for marker, name in known_ats_names:
+        if marker in host:
+            return name
+
     name = host.split(":")[0].split(".")[0]
     return name.replace("-", " ").title()
 
 
 def extract_title(soup: BeautifulSoup) -> str:
-    for selector in ("h1", "[class*='title']", "[class*='job-title']", "[data-qa='job-title']"):
+    selectors = (
+        "h1",
+        "[class*='job-title']",
+        "[class*='position-title']",
+        "[data-qa='job-title']",
+        "[class*='title']",
+    )
+    for selector in selectors:
         element = soup.select_one(selector)
         if element:
             title = " ".join(element.get_text(" ", strip=True).split())
             if title:
                 return title[:300]
-    title = soup.title.get_text(" ", strip=True) if soup.title else ""
-    return " ".join(title.split())[:300] or "Unknown"
+
+    if soup.title:
+        title = " ".join(soup.title.get_text(" ", strip=True).split())
+        title = re.sub(r"\s*[-|]\s*(?:jobs?|careers?|apply).*$", "", title, flags=re.I)
+        if title:
+            return title[:300]
+    return "Unknown"
 
 
 def get_visible_text(soup: BeautifulSoup) -> str:
@@ -47,15 +100,18 @@ def get_visible_text(soup: BeautifulSoup) -> str:
 
 
 def extract_experience(text: str) -> str:
-    matches = EXP_RE.findall(text)
+    matches = list(EXP_RE.finditer(text))
     if not matches:
+        if ENTRY_SIGNAL_RE.search(text):
+            return "Fresher / entry level"
         return "Not specified"
+
     first = matches[0]
-    low = first[0]
-    high = first[1] or first[2]
+    low = first.group(1)
+    high = first.group(2)
     if high:
         return f"{low}-{high} years"
-    if "+" in text[max(0, text.lower().find(low.lower()) - 10): text.lower().find(low.lower()) + 30]:
+    if "+" in first.group(0):
         return f"{low}+ years"
     return f"{low} years"
 
@@ -68,22 +124,73 @@ def extract_posting_date(soup: BeautifulSoup, text: str) -> date | None:
         except ValueError:
             pass
 
-    for attribute in ("datePublished", "uploadDate", "date"):
-        element = soup.select_one(f"[{attribute}]")
-        if element:
-            raw = element.get(attribute)
-            if raw:
+    for element in soup.find_all(attrs=True):
+        for attribute in ("datePublished", "uploadDate", "date"):
+            raw = element.attrs.get(attribute)
+            if not raw:
+                continue
+            raw = str(raw).strip()
+            for parser in (
+                lambda value: datetime.fromisoformat(value.replace("Z", "+00:00")).date(),
+                lambda value: datetime.strptime(value[:10], "%Y-%m-%d").date(),
+            ):
                 try:
-                    return datetime.fromisoformat(raw.replace("Z", "+00:00")).date()
-                except ValueError:
-                    try:
-                        return datetime.strptime(raw[:10], "%Y-%m-%d").date()
-                    except ValueError:
-                        pass
+                    return parser(raw)
+                except (TypeError, ValueError):
+                    pass
     return None
 
 
-def evaluate_job(link: str, company_override: str | None, constraints: SearchConstraints) -> Opening | None:
+def normalize_experience(text: str) -> tuple[float, float]:
+    normalized = text.lower().strip()
+    if re.search(
+        r"\b(?:fresher|fresh graduate|freshers|new graduate|new grad|"
+        r"entry[ -]?level|graduate trainee)\b",
+        normalized,
+    ):
+        return 0.0, 1.0
+
+    ranges = re.findall(
+        r"(\d+(?:\.\d+)?)\s*(?:-|to)\s*(\d+(?:\.\d+)?)",
+        normalized,
+    )
+    if ranges:
+        lows = [float(low) for low, _ in ranges]
+        highs = [float(high) for _, high in ranges]
+        return min(lows), max(highs)
+
+    match = re.search(r"\d+(?:\.\d+)?", normalized)
+    if match:
+        value = float(match.group())
+        return value, value
+    return 0.0, 1.0
+
+
+def technology_mentions(text: str, technology: str) -> bool:
+    needle = technology.lower().strip()
+    candidates = TECH_ALIASES.get(needle, (needle,))
+    padded = f" {text.lower()} "
+
+    for candidate in candidates:
+        candidate = candidate.strip()
+        if not candidate:
+            continue
+        if candidate in ("ai", "ml"):
+            if re.search(
+                rf"(?<![a-z0-9]){re.escape(candidate)}(?![a-z0-9])",
+                text.lower(),
+            ):
+                return True
+        elif candidate in padded:
+            return True
+    return False
+
+
+def evaluate_job(
+    link: str,
+    company_override: str | None,
+    constraints: SearchConstraints,
+) -> Opening | None:
     try:
         html, final_url = fetch(link)
     except requests.RequestException:
@@ -95,29 +202,30 @@ def evaluate_job(link: str, company_override: str | None, constraints: SearchCon
     soup = BeautifulSoup(html, "html.parser")
     text = get_visible_text(soup)
     title = extract_title(soup)
-    if title.lower() in {"deloitte india", "unknown", "careers", "jobs", "search jobs"}:
+
+    generic_titles = {
+        "unknown",
+        "deloitte india",
+        "careers",
+        "jobs",
+        "search jobs",
+        "job search",
+    }
+    if title.lower().strip() in generic_titles:
         return None
+
+    lower = text.lower()
     experience = extract_experience(text)
     posting_date = extract_posting_date(soup, text)
-    lower = text.lower()
 
-    _, desired_max = constraints.experience_range()
+    desired_min, desired_max = normalize_experience(constraints.experience)
     confidence = 35
     reasons: list[str] = []
 
-    senior_title_re = re.compile(
-        r"\b(lead|senior|sr\.?|manager|deputy|principal|director|head|vp|vice president|staff engineer)\b",
-        re.I,
-    )
-    if senior_title_re.search(title):
-        reasons.append("Title indicates a senior/management level")
-        confidence -= 50
+    experience_matches = [float(match.group(1)) for match in EXP_RE.finditer(text)]
+    minimum = min(experience_matches) if experience_matches else None
+    wants_fresher = desired_max <= 1.0
 
-    experience_numbers = [
-        float(match.group(1))
-        for match in EXP_RE.finditer(text)
-    ]
-    minimum = min(experience_numbers) if experience_numbers else None
     if minimum is not None:
         if minimum <= desired_max:
             confidence += 35
@@ -125,55 +233,38 @@ def evaluate_job(link: str, company_override: str | None, constraints: SearchCon
         else:
             confidence -= 50
             reasons.append(f"JD experience floor ({minimum:g} years) exceeds constraint")
+    elif ENTRY_SIGNAL_RE.search(text):
+        confidence += 30
+        reasons.append("JD indicates a fresher or entry-level role")
+    elif wants_fresher:
+        confidence -= 15
+        reasons.append("No explicit fresher or entry-level signal")
 
-    entry_signals = re.search(
-        r"\b(entry[\s-]?level|fresher|fresh graduate|new graduate|new grad|graduate|0\s*(?:-|to)\s*1|intern|associate)\b",
-        lower,
-    )
-    if minimum is None:
-        if entry_signals:
-            confidence += 25
-            reasons.append("JD indicates an entry-level or graduate role")
-        else:
-            confidence -= 15
-            reasons.append("No explicit experience floor or entry-level signal")
+    if SENIOR_TITLE_RE.search(title) and wants_fresher:
+        confidence -= 40
+        reasons.append("Title indicates senior or management scope")
 
     matched_technologies: list[str] = []
-    aliases = {
-        "ai/ml": ("artificial intelligence", "machine learning", "ai", "ml"),
-        "ai": ("artificial intelligence", "ai"),
-        "machine learning": ("machine learning", "ml"),
-        "data engineering": ("data engineer", "data engineering", "etl", "data pipeline", "spark"),
-    }
     for technology in constraints.technologies or []:
-        needle = technology.lower().strip()
-        candidates = aliases.get(needle, (needle,))
-        matched = any(re.search(r"(?<![\w])" + re.escape(candidate) + r"(?![\w])", lower) for candidate in candidates)
-        if matched:
+        if technology_mentions(lower, technology):
             confidence += 20
-            reasons.append(f"Mentions {technology}")
             matched_technologies.append(technology)
+            reasons.append(f"Mentions {technology}")
 
-    for phrase in (
-        "bachelor",
-        "intern",
-        "entry level",
-        "entry-level",
-        "new grad",
-        "graduate",
-        "0-1",
-        "0 to 1",
-    ):
-        if phrase in lower:
-            confidence += 10
-            reasons.append(f"Mentions {phrase}")
-            break
+    if constraints.technologies and not matched_technologies:
+        reasons.append("No requested technology was found in the JD")
 
     minimum_confidence = 40 if constraints.include_unknown else 60
     if constraints.technologies:
         is_match = bool(matched_technologies) and confidence >= minimum_confidence
     else:
         is_match = confidence >= minimum_confidence
+
+    if minimum is not None and minimum > desired_max:
+        is_match = False
+
+    if SENIOR_TITLE_RE.search(title) and wants_fresher:
+        is_match = False
 
     return Opening(
         company=infer_company(final_url, company_override),
@@ -182,6 +273,6 @@ def evaluate_job(link: str, company_override: str | None, constraints: SearchCon
         posting_date=posting_date,
         link=final_url,
         is_match=is_match,
-        confidence=min(confidence, 100),
+        confidence=max(0, min(confidence, 100)),
         reason="; ".join(reasons) or "No explicit JD match signals",
     )

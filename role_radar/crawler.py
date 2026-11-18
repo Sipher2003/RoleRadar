@@ -93,6 +93,73 @@ def discover_with_browser(start_url: str, limit: int) -> list[str]:
             page.goto(start_url, wait_until="domcontentloaded", timeout=60000)
             page.wait_for_timeout(5000)
 
+            # Wipro category pages use pageNumber parameters.
+            if "careers.wipro.com/go/" in start_url.lower():
+                for page_number in range(0, 100):
+                    separator = "&" if "?" in start_url else "?"
+                    current_url = (
+                        f"{start_url}{separator}pageNumber={page_number}"
+                        if page_number > 0
+                        else start_url
+                    )
+                    try:
+                        page.goto(current_url, wait_until="domcontentloaded", timeout=30000)
+                        page.wait_for_timeout(1200)
+                        before = len(seen)
+                        job_links = page.locator("a[href*='/job/']").evaluate_all(
+                            "(links) => links.map(a => a.href)"
+                        )
+                        for absolute in job_links:
+                            clean = absolute.split("#", 1)[0]
+                            if clean and clean not in seen:
+                                seen.add(clean)
+                                links.append(clean)
+                                if len(links) >= limit:
+                                    break
+                        if page_number > 0 and len(seen) == before:
+                            break
+                    except Exception:
+                        break
+                    if len(links) >= limit:
+                        break
+                if links:
+                    browser.close()
+                    return links
+
+            # Deloitte US uses explicit jobOffset pages for /SearchJobs/.
+            if "/careersusi" in start_url.lower() or "usijobs.deloitte" in start_url.lower():
+                for offset in range(0, 500, 10):
+                    if len(seen) >= limit:
+                        break
+                    if offset == 0:
+                        current_url = start_url
+                    else:
+                        separator = "&" if "?" in start_url else "?"
+                        current_url = (
+                            f"{start_url}{separator}jobRecordsPerPage=10&jobOffset={offset}"
+                        )
+                    try:
+                        page.goto(current_url, wait_until="domcontentloaded", timeout=30000)
+                        page.wait_for_timeout(1200)
+                        before = len(seen)
+                        job_links = page.locator("a[href*='JobDetail']").evaluate_all(
+                            "(links) => links.map(a => a.href)"
+                        )
+                        for absolute in job_links:
+                            clean = absolute.split("#", 1)[0]
+                            if clean and clean not in seen:
+                                seen.add(clean)
+                                links.append(clean)
+                                if len(links) >= limit:
+                                    break
+                        if offset > 0 and len(seen) == before:
+                            break
+                    except Exception:
+                        break
+                if links:
+                    browser.close()
+                    return links
+
             apply_links = page.locator("a").evaluate_all(
                 """a => a.filter(x => /apply/i.test(x.textContent))
                              .map(x => x.href)"""
@@ -156,6 +223,33 @@ def discover_with_browser(start_url: str, limit: int) -> list[str]:
                         if len(links) >= limit:
                             browser.close()
                             return links
+
+                next_control = page.locator(
+                    "a[aria-label*='Next' i], "
+                    "a:has-text('Next'), "
+                    "a.paginationNextLink, "
+                    "button[aria-label*='Next' i]"
+                ).first
+                if next_control.count() > 0:
+                    try:
+                        before = len(seen)
+                        next_href = next_control.get_attribute("href")
+                        if next_href:
+                            next_url = urljoin(page.url, next_href)
+                            if next_url not in visited_pages:
+                                page.goto(next_url, wait_until="domcontentloaded", timeout=30000)
+                                page.wait_for_timeout(1500)
+                                if len(seen) == before:
+                                    break
+                                continue
+                        next_control.scroll_into_view_if_needed()
+                        next_control.click(timeout=5000)
+                        page.wait_for_timeout(1500)
+                        if len(seen) == before:
+                            break
+                        continue
+                    except Exception:
+                        pass
 
                 paginated_urls: dict[int, str] = {}
                 for href in page.locator("a[href]").evaluate_all("(anchors) => anchors.map(a => a.href)"):

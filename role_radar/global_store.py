@@ -108,7 +108,6 @@ class GlobalSearchStore:
             "youtube.com",
         )
         job_hosts = (
-            "linkedin.com",
             "indeed.com",
             "naukri.com",
             "wellfound.com",

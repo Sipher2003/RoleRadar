@@ -9,12 +9,11 @@ import requests
 
 from .crawler import HEADERS
 from .evaluator import evaluate_job
-from .models import SearchConstraints
+from .models import Opening, SearchConstraints
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 JOB_BOARDS = (
-    "linkedin.com/jobs/view",
     "indeed.com/viewjob",
     "naukri.com",
     "wellfound.com",
@@ -26,7 +25,6 @@ def looks_like_job_result(candidate: dict) -> bool:
     link = candidate["link"].lower()
     host = urlparse(link).netloc.lower()
     known = any(marker in host for marker in (
-        "linkedin.com",
         "indeed.com",
         "naukri.com",
         "wellfound.com",
@@ -94,8 +92,6 @@ def clean_search_url(url: str) -> str:
     clean = unquote(url.strip().split("#", 1)[0])
     parsed = urlparse(clean)
     host = parsed.netloc.lower()
-    if "linkedin.com" in host:
-        clean = urlunparse(parsed._replace(query="", fragment=""))
     if "indeed.com" in host:
         query = dict(parse_qsl(parsed.query))
         jobkey = query.get("jk")
@@ -134,6 +130,8 @@ def source_name(url: str) -> str:
         return "Arbeitnow"
     if "remotive" in host:
         return "Remotive"
+    if "remoteok" in host:
+        return "Remoteok"
     if "himalayas" in host:
         return "Himalayas"
     return host.split(".")[0].title() if host else "Unknown"
@@ -268,6 +266,7 @@ def extract_public_apis(technologies: list[str], location: str, days: int, limit
                         "link": link,
                         "posting_date": parse_rss_date(str(job.get("publication_date", ""))),
                         "description": str(job.get("description", "")),
+                        "source": "Remotive",
                     })
         except (requests.RequestException, ValueError):
             pass
@@ -300,6 +299,7 @@ def extract_public_apis(technologies: list[str], location: str, days: int, limit
                         "link": link,
                         "posting_date": parse_rss_date(str(job.get("created_at", ""))),
                         "description": str(job.get("description", "")),
+                        "source": "Arbeitnow",
                     })
         except (requests.RequestException, ValueError):
             pass
@@ -373,8 +373,6 @@ def search_public_web(
 
     for candidate in extract_public_apis(tech_terms, location, days, limit):
         collected.setdefault(candidate["link"], candidate)
-        if len(collected) >= limit:
-            return list(collected.values())[:limit]
 
     for technology in tech_terms:
         for board in JOB_BOARDS:
@@ -404,41 +402,6 @@ def search_public_web(
             with sync_playwright() as playwright:
                 browser = playwright.chromium.launch(headless=True)
                 page = browser.new_page()
-                for technology in tech_terms:
-                    for page_num in range(2):
-                        linkedin_url = (
-                            "https://www.linkedin.com/jobs/search/"
-                            f"?keywords={requests.utils.quote(technology)}"
-                            "&location=India&f_TPR=r604800"
-                            f"&position=1&pageNum={page_num}"
-                        )
-                        try:
-                            page.goto(linkedin_url, wait_until="domcontentloaded", timeout=25000)
-                            page.wait_for_timeout(1000)
-                            before = len(collected)
-                            for href in page.locator("a[href*='/jobs/view/']").evaluate_all(
-                                "(links) => links.map(a => ({title:a.innerText, href:a.href}))"
-                            ):
-                                link = clean_search_url(href.get("href", ""))
-                                if link and "/jobs/view/" in link.lower():
-                                    collected.setdefault(link, {
-                                        "title": href.get("title", "").strip(),
-                                        "link": link,
-                                        "posting_date": date.today(),
-                                        "description": "",
-                                        "source": "LinkedIn",
-                                    })
-                                if len(collected) >= limit:
-                                    break
-                            if len(collected) >= limit:
-                                break
-                            if len(collected) == before:
-                                break
-                        except Exception:
-                            break
-                    if len(collected) >= limit:
-                        break
-
                 naukri_slugs = {
                     "python": "python",
                     "java": "java",
@@ -489,7 +452,7 @@ def search_public_web(
                     try:
                         page.goto(
                             "https://in.indeed.com/jobs"
-                            f"?q={requests.utils.quote(technology)}&l=India&fromage=7",
+                            f"?q={requests.utils.quote(technology)}&l=India&fromage={days}",
                             wait_until="domcontentloaded",
                             timeout=20000,
                         )
@@ -610,7 +573,25 @@ def search_public_web(
         except Exception:
             pass
 
-    return list(collected.values())[:limit]
+    grouped: dict[str, list[dict]] = {}
+    for candidate in collected.values():
+        source = candidate.get("source") or source_name(candidate["link"])
+        candidate["source"] = source
+        grouped.setdefault(source, []).append(candidate)
+
+    interleaved: list[dict] = []
+    while len(interleaved) < limit:
+        added = 0
+        for source in sorted(grouped, key=lambda name: (name == "LinkedIn", name)):
+            source_items = grouped[source]
+            if source_items:
+                interleaved.append(source_items.pop(0))
+                added += 1
+                if len(interleaved) >= limit:
+                    break
+        if not added:
+            break
+    return interleaved
 
 
 def run_global_search(
@@ -637,6 +618,88 @@ def run_global_search(
 
     openings = []
     unresolved = []
+
+    def fallback_from_candidate(candidate: dict) -> Opening | None:
+        source = candidate.get("source", source_name(candidate["link"]))
+        if source not in {
+            "Himalayas",
+            "Remoteok",
+            "Remotive",
+            "Arbeitnow",
+            "Wellfound",
+        }:
+            return None
+
+        title = candidate.get("title", "Unknown title") or "Unknown title"
+        text = " ".join((
+            title,
+            candidate.get("description", ""),
+        ))
+        lower = text.lower()
+
+        senior_re = re.compile(
+            r"\b(?:senior|lead|principal|manager|director|head|staff|vp)\b",
+            re.I,
+        )
+        if senior_re.search(title):
+            return None
+
+        experience_re = re.compile(
+            r"(?<!\d)(\d+(?:\.\d+)?)\s*(?:-|to)\s*(\d+(?:\.\d+)?)"
+            r"|(?<!\d)(\d+(?:\.\d+)?)\+\s*(?:years?|yrs?)",
+            re.I,
+        )
+        experience_matches = [
+            float(value)
+            for match in experience_re.finditer(text)
+            for value in match.groups()
+            if value
+        ]
+        if experience_matches and max(experience_matches) > 2:
+            return None
+
+        matched_technology = False
+        for technology in technologies:
+            needle = technology.lower().strip()
+            aliases = {
+                "ai/ml": ("ai", "ml", "artificial intelligence", "machine learning"),
+                "data engineering": ("data engineering", "data engineer", "etl", "spark"),
+                "frontend": ("frontend", "front-end", "react", "angular", "vue"),
+                "backend": ("backend", "back-end", "django", "flask", "node"),
+                "erp": ("erp", "enterprise resource planning", "sap"),
+                "automation testing": ("automation", "selenium", "playwright", "test automation"),
+            }.get(needle, (needle,))
+            if any(
+                re.search(rf"(?<![a-z0-9]){re.escape(alias)}(?![a-z0-9])", lower)
+                for alias in aliases
+            ):
+                matched_technology = True
+                break
+        if not matched_technology:
+            return None
+
+        foreign_re = re.compile(
+            r"\b(?:united kingdom|uk\b|london|england|europe|emea|germany|"
+            r"france|netherlands|united states|usa\b|canada|australia|"
+            r"switzerland|zurich|zürich)\b",
+            re.I,
+        )
+        if foreign_re.search(text):
+            return None
+
+        return Opening(
+            company=source,
+            title=title,
+            experience="Fresher / 0-2 years",
+            posting_date=candidate.get("posting_date"),
+            link=candidate["link"],
+            is_match=True,
+            confidence=70,
+            reason=f"Matched from {source} title and description metadata",
+            location="Remote / India" if re.search(r"\b(?:remote|india)\b", lower) else "Remote",
+            source=source,
+        )
+
     def evaluate_candidate(index_candidate):
         index, candidate = index_candidate
         link = candidate["link"]
@@ -658,6 +721,8 @@ def run_global_search(
                 print(f"Inspected {completed_count}/{len(candidates)} candidates")
             _, candidate, opening = future.result()
             link = candidate["link"]
+            if opening is None:
+                opening = fallback_from_candidate(candidate)
             if opening is not None and opening.is_match:
                 if not getattr(opening, "source", None) or opening.source == "Unknown":
                     opening.source = candidate.get("source", source_name(link))

@@ -27,7 +27,8 @@ SENIOR_TITLE_RE = re.compile(
 NON_TECH_TITLE_RE = re.compile(
     r"\b(?:talent acquisition|recruiter|recruitment|account executive|"
     r"sales|customer support|support coach|marketing|financial analyst|"
-    r"accountant|accounting|human resources|hr partner)\b",
+    r"accountant|accounting|human resources|hr partner|filmmaker|"
+    r"video editor|travel planner|cruise planner|content writer)\b",
     re.I,
 )
 
@@ -78,6 +79,24 @@ def infer_company(url: str, override: str | None = None) -> str:
 
 
 def extract_title(soup: BeautifulSoup) -> str:
+    if soup.title:
+        page_title = " ".join(soup.title.get_text(" ", strip=True).split())
+        generic_page_titles = {
+            "deloitte | india offices of the us",
+            "unknown",
+        }
+        if page_title.lower().strip() not in generic_page_titles:
+            title = re.sub(
+                r"\s+-\s+(?:Hyderabad|Bengaluru|Bangalore|Mumbai|Pune|Chennai|Delhi|Gurugram|Gurgaon|Noida).*",
+                "",
+                page_title,
+                flags=re.I,
+            )
+            title = re.sub(r"\s+-\s+-\s+\d+\s*$", "", title)
+            title = re.sub(r"\s+-\s+\d+\s*$", "", title)
+            if title:
+                return title[:300]
+
     selectors = (
         "h1",
         "[class*='job-title']",
@@ -98,6 +117,32 @@ def extract_title(soup: BeautifulSoup) -> str:
         if title:
             return title[:300]
     return "Unknown"
+
+
+def extract_json_ld_text(soup: BeautifulSoup) -> str:
+    chunks: list[str] = []
+    for script in soup.select('script[type="application/ld+json"]'):
+        raw = script.string or script.get_text("", strip=True)
+        if not raw:
+            continue
+        import json
+        try:
+            data = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        stack = data if isinstance(data, list) else [data]
+        while stack:
+            item = stack.pop()
+            if isinstance(item, dict):
+                for key in ("title", "name", "description", "experienceRequirements",
+                            "occupationalCategory", "jobLocation"):
+                    value = item.get(key)
+                    if isinstance(value, str):
+                        chunks.append(value)
+                stack.extend(value for value in item.values() if isinstance(value, (dict, list)))
+            elif isinstance(item, list):
+                stack.extend(item)
+    return " ".join(chunks)
 
 
 def get_visible_text(soup: BeautifulSoup) -> str:
@@ -176,13 +221,6 @@ def extract_location(text: str) -> str:
 
 def normalize_experience(text: str) -> tuple[float, float]:
     normalized = text.lower().strip()
-    if re.search(
-        r"\b(?:fresher|fresh graduate|freshers|new graduate|new grad|"
-        r"entry[ -]?level|graduate trainee)\b",
-        normalized,
-    ):
-        return 0.0, 1.0
-
     ranges = re.findall(
         r"(\d+(?:\.\d+)?)\s*(?:-|to)\s*(\d+(?:\.\d+)?)",
         normalized,
@@ -191,6 +229,12 @@ def normalize_experience(text: str) -> tuple[float, float]:
         lows = [float(low) for low, _ in ranges]
         highs = [float(high) for _, high in ranges]
         return min(lows), max(highs)
+    if re.search(
+        r"\b(?:fresher|fresh graduate|freshers|new graduate|new grad|"
+        r"entry[ -]?level|graduate trainee)\b",
+        normalized,
+    ):
+        return 0.0, 1.0
 
     match = re.search(r"\d+(?:\.\d+)?", normalized)
     if match:
@@ -229,7 +273,7 @@ def evaluate_job(
     except requests.RequestException:
         html, final_url = "", link
 
-    browser_hosts = ("workday", "linkedin.com", "naukri.com", "indeed.com")
+    browser_hosts = ("workday", "naukri.com", "indeed.com", "himalayas.app")
     if any(host in urlparse(link).netloc.lower() for host in browser_hosts):
         try:
             from playwright.sync_api import sync_playwright
@@ -238,7 +282,7 @@ def evaluate_job(
                 browser = playwright.chromium.launch(headless=True)
                 page = browser.new_page()
                 page.goto(link, wait_until="domcontentloaded", timeout=60000)
-                page.wait_for_timeout(2500)
+                page.wait_for_timeout(5000)
                 html = page.content()
                 browser.close()
         except Exception:
@@ -249,6 +293,9 @@ def evaluate_job(
 
     soup = BeautifulSoup(html, "html.parser")
     text = get_visible_text(soup)
+    ld_text = extract_json_ld_text(soup)
+    if ld_text:
+        text = f"{text} {ld_text}"
     title = extract_title(soup)
 
     generic_titles = {
@@ -277,7 +324,14 @@ def evaluate_job(
         if match.group(2):
             experience_matches.append(float(match.group(2)))
     minimum = max(experience_matches) if experience_matches else None
-    wants_fresher = desired_max <= 1.0
+    wants_fresher = (
+        desired_max <= 1.0
+        or bool(re.search(
+            r"\b(?:fresher|fresh graduate|new graduate|new grad|entrylevel|entry[ -]?level|intern)\b",
+            constraints.experience,
+            re.I,
+        ))
+    )
 
     if minimum is not None:
         if minimum <= desired_max:
@@ -335,7 +389,7 @@ def evaluate_job(
             r"zurich|zürich|sweden)\b",
             re.I,
         )
-        if foreign_location_re.search(text):
+        if "india" not in detected_location.lower() and foreign_location_re.search(text):
             is_match = False
             reasons.append("Location is outside India")
 
@@ -350,8 +404,7 @@ def evaluate_job(
         reason="; ".join(reasons) or "No explicit JD match signals",
         location=extract_location(text),
         source=(
-            "LinkedIn" if "linkedin.com" in urlparse(final_url).netloc
-            else "Naukri" if "naukri.com" in urlparse(final_url).netloc
+            "Naukri" if "naukri.com" in urlparse(final_url).netloc
             else "Indeed" if "indeed.com" in urlparse(final_url).netloc
             else "Wellfound" if "wellfound.com" in urlparse(final_url).netloc
             else "Hirist" if "hirist" in urlparse(final_url).netloc

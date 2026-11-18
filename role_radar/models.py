@@ -16,11 +16,11 @@ class SearchConstraints:
 
     def experience_range(self) -> tuple[float, float]:
         normalized = self.experience.lower().strip()
-        if any(term in normalized for term in ("fresher", "fresh graduate", "new grad", "graduate", "entry level", "entry-level")):
-            return 0.0, 1.0
         ranges = re.findall(r"(\d+(?:\.\d+)?)\s*(?:-|to)\s*(\d+(?:\.\d+)?)", normalized)
         if ranges:
             return min(float(low) for low, _ in ranges), max(float(high) for _, high in ranges)
+        if any(term in normalized for term in ("fresher", "fresh graduate", "new grad", "graduate", "entry level", "entry-level")):
+            return 0.0, 1.0
         match = re.search(r"(\d+(?:\.\d+)?)\s*(?:-|to)\s*(\d+(?:\.\d+)?)", self.experience)
         if match:
             return float(match.group(1)), float(match.group(2))

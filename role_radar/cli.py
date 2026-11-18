@@ -16,7 +16,11 @@ def build_parser() -> argparse.ArgumentParser:
         prog="role-radar",
         description="Find relevant openings from a company career page.",
     )
-    parser.add_argument("url", help="Career page or jobs listing URL")
+    parser.add_argument(
+        "urls",
+        nargs="+",
+        help="One or more career page URLs (separate with spaces)",
+    )
     parser.add_argument(
         "--experience",
         default="0-1",
@@ -153,11 +157,30 @@ def main() -> None:
         technologies=technologies,
         include_unknown=args.include_unknown,
     )
-    links = discover_job_links(args.url, args.max_links)
+    urls = [
+        item.strip()
+        for value in args.urls
+        for item in value.split(",")
+        if item.strip()
+    ]
+
+    all_links: list[str] = []
+    seen_links: set[str] = set()
+    for url in urls:
+        print(f"Discovering jobs from: {url}")
+        try:
+            links = discover_job_links(url, args.max_links)
+        except Exception as exc:
+            print(f"Could not process {url}: {exc}")
+            continue
+        for link in links:
+            if link not in seen_links:
+                seen_links.add(link)
+                all_links.append(link)
 
     if args.list_only:
-        print(f"Discovered {len(links)} job links:")
-        for link in links:
+        print(f"\nDiscovered {len(all_links)} unique job links:")
+        for link in all_links:
             print(link)
         return
 
@@ -165,11 +188,11 @@ def main() -> None:
     with ThreadPoolExecutor(max_workers=6) as executor:
         futures = {
             executor.submit(evaluate_job, link, args.company, constraints): index
-            for index, link in enumerate(links, start=1)
+            for index, link in enumerate(all_links, start=1)
         }
         for completed in as_completed(futures):
             index = futures[completed]
-            print(f"Inspected JD {index}/{len(links)}")
+            print(f"Inspected JD {index}/{len(all_links)}")
             try:
                 opening = completed.result()
             except Exception:

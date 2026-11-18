@@ -1,0 +1,2 @@
+[console_scripts]
+role-radar = role_radar.cli:main

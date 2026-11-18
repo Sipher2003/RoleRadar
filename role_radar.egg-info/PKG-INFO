@@ -1,0 +1,9 @@
+Metadata-Version: 2.4
+Name: role-radar
+Version: 0.1.0
+Summary: Find genuinely relevant entry-level openings from company career pages
+Requires-Python: >=3.10
+Requires-Dist: beautifulsoup4>=4.12
+Requires-Dist: openpyxl>=3.1
+Requires-Dist: playwright>=1.49
+Requires-Dist: requests>=2.31

@@ -1,0 +1,16 @@
+README.md
+pyproject.toml
+role_radar/__init__.py
+role_radar/cli.py
+role_radar/crawler.py
+role_radar/evaluator.py
+role_radar/excel_store.py
+role_radar/models.py
+role_radar.egg-info/PKG-INFO
+role_radar.egg-info/SOURCES.txt
+role_radar.egg-info/dependency_links.txt
+role_radar.egg-info/entry_points.txt
+role_radar.egg-info/requires.txt
+role_radar.egg-info/top_level.txt
+tests/test_evaluator.py
+tests/test_excel_store.py

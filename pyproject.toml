@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "role-radar"
+version = "0.1.0"
+description = "Find genuinely relevant entry-level openings from company career pages"
+requires-python = ">=3.10"
+dependencies = [
+  "beautifulsoup4>=4.12",
+  "openpyxl>=3.1",
+  "playwright>=1.49",
+  "requests>=2.31",
+]
+
+[project.scripts]
+role-radar = "role_radar.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["role_radar*"]

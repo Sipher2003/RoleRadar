@@ -21,7 +21,7 @@ role-radar "https://company.example/careers" --experience "0-1" --tech Python --
 role-radar search --experience "0-1,fresher" --location "India,remote" --tech "Python,Java,AI/ML,ERP,Data Engineering,frontend,backend,automation testing" --days 7
 ```
 
-The global command searches LinkedIn, Indeed, Naukri, Wellfound, Glassdoor, and general public search indexes. It writes matches to `search_openings_*.xlsx` and places unverified/search-result-only entries in the `Manual Review` sheet.
+The global command searches LinkedIn, Indeed, Naukri, Wellfound, Glassdoor, and general public search indexes. It writes matches to `search_openings_*.xlsx` and places unverified/search-result-only entries in the `Manual Review` sheet. Global search is still under development as it mostly returns linkedin openings only completely ignoring and missing other global search.
 
 Options:
 
@@ -44,3 +44,6 @@ The evaluator deliberately reads the JD. It checks:
 - absence of a rigid experience requirement.
 
 It does not treat a title containing "senior" as a title-only exclusion: if the JD itself fits the constraints, it can still be reported.
+
+## Note
+Built specifically to streamline your job search, this project was heavily vibe coded with Claude and GitHub Copilot.
